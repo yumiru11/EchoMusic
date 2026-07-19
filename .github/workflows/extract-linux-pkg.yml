@@ -1,0 +1,46 @@
+name: Extract Linux pkg.tar.zst
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "源 run id（Linux x64 artifact 所在的 run）"
+        required: true
+        default: "29695695680"
+
+jobs:
+  extract:
+    name: Extract and re-upload .pkg.tar.zst
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Download source artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.inputs.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          mkdir -p work && cd work
+          gh run download "$RUN_ID" --repo "$REPO" --name EchoMusic-Linux-x64 --dir .
+          ls -lh
+
+      - name: List and select .pkg.tar.zst
+        id: select
+        run: |
+          set -e
+          cd work
+          ls -lh
+          pkg=$(ls EchoMusic-*.pkg.tar.zst | head -n1)
+          echo "Selected: $pkg"
+          echo "pkg_path=$pkg" >> "$GITHUB_OUTPUT"
+
+      - name: Upload single pkg.tar.zst as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoMusic-Linux-x64-pkg
+          path: work/${{ steps.select.outputs.pkg_path }}
+          if-no-files-found: error
+          retention-days: 7
