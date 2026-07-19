@@ -1,7 +1,7 @@
 use crate::dsp::SampleRing;
 use crate::effects::{DspChain, DspSettings};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -33,6 +33,8 @@ pub struct SharedAudio {
     pub sample_rate: u32,
     pub played_samples: AtomicU64,
     last_time_event_samples: AtomicU64,
+    /// 当前播放速度（f32 存为 bits）。解码线程读取此值做变速。
+    speed: AtomicU32,
     interrupt: Mutex<Option<Arc<AtomicBool>>>,
     signal_tx: Mutex<Option<SyncSender<PlaybackSignal>>>,
 }
@@ -60,9 +62,20 @@ impl SharedAudio {
             sample_rate,
             played_samples: AtomicU64::new(0),
             last_time_event_samples: AtomicU64::new(0),
+            speed: AtomicU32::new(dsp_settings.speed.to_bits()),
             interrupt: Mutex::new(None),
             signal_tx: Mutex::new(None),
         }
+    }
+
+    /// 写入当前速度（由 SetSpeedTask 调用）。
+    pub fn set_speed(&self, speed: f32) {
+        self.speed.store(speed.to_bits(), Ordering::Release);
+    }
+
+    /// 读取当前速度（由解码线程调用）。
+    pub fn current_speed(&self) -> f32 {
+        f32::from_bits(self.speed.load(Ordering::Acquire))
     }
 
     pub fn request_stop(&self) {

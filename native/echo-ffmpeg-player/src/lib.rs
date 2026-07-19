@@ -667,7 +667,11 @@ impl Task for SetSpeedTask {
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         with_runtime(|runtime| {
-            runtime.dsp_settings.speed = tempo::normalize_speed(self.speed);
+            let normalized = tempo::normalize_speed(self.speed);
+            runtime.dsp_settings.speed = normalized;
+            if let Some(session) = runtime.session.as_ref() {
+                session.shared.set_speed(normalized);
+            }
             Ok(())
         })
     }
@@ -934,6 +938,12 @@ impl Task for FadeTask {
     type JsValue = ();
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
+        let fade_stop = with_runtime(|runtime| {
+            let flag = runtime.fade_stop.clone();
+            // 复位取消标志：新 fade 启动时旧标志必须清掉，否则会被上一轮 cancel_fade 误杀。
+            flag.store(false, Ordering::Release);
+            Ok(flag)
+        })?;
         let steps = (self.duration_ms / 16.0).ceil().max(1.0) as u32;
         if self.start_playback {
             set_volume(self.from)?;
@@ -949,6 +959,11 @@ impl Task for FadeTask {
         }
         let first_step = if self.start_playback { 1 } else { 0 };
         for step in first_step..=steps {
+            // 用户在 fade 过程中拖动音量条会触发 cancel_fade，把 fade_stop 置 true。
+            // 检测到后立即退出循环，保留用户设置的音量，避免音量“鬼畜”。
+            if fade_stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
             let t = step as f64 / steps as f64;
             let value = self.from + (self.to - self.from) * t;
             set_volume(value)?;

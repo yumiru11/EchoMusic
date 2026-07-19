@@ -1,6 +1,7 @@
 use crate::events::{PlayerErrorCode, PlayerEvent, TrackInfo};
 use crate::network_stream::{open_source, ReadSeek};
 use crate::shared::SharedAudio;
+use crate::tempo::TempoProcessor;
 use ffmpeg_audio::{sys, AudioError, AudioReader, ResampleOptions, Resampler, SeekMode};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -12,6 +13,7 @@ pub struct DecoderData {
     resampler: Resampler,
     interrupt: Arc<AtomicBool>,
     duration: Option<Duration>,
+    tempo: TempoProcessor,
 }
 
 impl DecoderData {
@@ -48,6 +50,7 @@ impl DecoderData {
             resampler,
             interrupt,
             duration,
+            tempo: TempoProcessor::new(crate::shared::TARGET_CHANNELS),
         })
     }
 
@@ -80,6 +83,7 @@ impl DecoderData {
     pub fn decode_into(mut self, shared: Arc<SharedAudio>) -> Option<Self> {
         shared.bind_interrupt(self.interrupt.clone());
         let mut produced_frames = 0u64;
+        let mut tempo_output: Vec<f32> = Vec::new();
         loop {
             if shared.should_stop_decoding() {
                 return (!shared.stop.load(Ordering::Acquire)).then_some(self);
@@ -90,7 +94,13 @@ impl DecoderData {
                         let output = self.resampler.output_as::<f32>();
                         produced_frames = produced_frames
                             .saturating_add((output.len() / crate::shared::TARGET_CHANNELS) as u64);
-                        if !shared.push_samples(output) {
+                        let speed = shared.current_speed();
+                        tempo_output.clear();
+                        self.tempo.process(output, speed, &mut tempo_output);
+                        if tempo_output.is_empty() {
+                            continue;
+                        }
+                        if !shared.push_samples(&tempo_output) {
                             return (!shared.stop.load(Ordering::Acquire)).then_some(self);
                         }
                     }
@@ -103,7 +113,19 @@ impl DecoderData {
                 },
                 Ok(None) => {
                     if let Ok(true) = self.resampler.process::<f32>(None) {
-                        let _ = shared.push_samples(self.resampler.output_as::<f32>());
+                        let output = self.resampler.output_as::<f32>();
+                        let speed = shared.current_speed();
+                        let mut tempo_out: Vec<f32> = Vec::new();
+                        self.tempo.process(output, speed, &mut tempo_out);
+                        if !tempo_out.is_empty() {
+                            let _ = shared.push_samples(&tempo_out);
+                        }
+                    }
+                    // 冲出 tempo 内部残留样本
+                    let mut flush_out: Vec<f32> = Vec::new();
+                    self.tempo.flush(&mut flush_out);
+                    if !flush_out.is_empty() {
+                        let _ = shared.push_samples(&flush_out);
                     }
                     shared.mark_eof();
                     return None;
@@ -117,7 +139,18 @@ impl DecoderData {
                             "treating trailing decode error as EOF: {err}"
                         ));
                         if let Ok(true) = self.resampler.process::<f32>(None) {
-                            let _ = shared.push_samples(self.resampler.output_as::<f32>());
+                            let output = self.resampler.output_as::<f32>();
+                            let speed = shared.current_speed();
+                            let mut tempo_out: Vec<f32> = Vec::new();
+                            self.tempo.process(output, speed, &mut tempo_out);
+                            if !tempo_out.is_empty() {
+                                let _ = shared.push_samples(&tempo_out);
+                            }
+                        }
+                        let mut flush_out: Vec<f32> = Vec::new();
+                        self.tempo.flush(&mut flush_out);
+                        if !flush_out.is_empty() {
+                            let _ = shared.push_samples(&flush_out);
                         }
                         shared.mark_eof();
                         return None;
