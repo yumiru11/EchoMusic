@@ -153,8 +153,6 @@ export class PlayerController extends EventEmitter {
 
   async setVolume(volume: number): Promise<void> {
     this.state.volume = volume;
-    // 取消进行中的 fade，避免 fade 任务每 16ms 用旧值覆盖用户刚拖动的音量，造成“鬼畜”。
-    this.getAddonOrThrow().cancelFade();
     this.getAddonOrThrow().setVolume(volume);
   }
 
